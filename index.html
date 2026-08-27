@@ -57,7 +57,8 @@
 <body>
 <div class="wrap">
   <h1>Immobilien‑Belegscanner</h1>
-  <div class="sub">Beleg fotografieren, Daten auslesen, Immobilie zuordnen und als Excel exportieren.</div>
+  <div class="sub">Beleg fotografieren, Daten auslesen, Immobilie zuordnen und als Excel exportieren. <b>V9</b></div>
+<div id="jsStatus" class="status err" style="margin-bottom:10px">JavaScript wird geladen …</div>
 
   <div class="grid">
     <section class="card">
@@ -71,8 +72,8 @@
       <input id="galleryInput" type="file" accept="image/*" style="display:none">
 
       <div class="row" style="margin-top:12px">
-        <button class="primary" id="cameraBtn" style="flex:1;font-size:17px;padding:14px">📷 Beleg fotografieren</button>
-        <button class="secondary" id="galleryBtn" style="flex:1;font-size:16px;padding:14px">🖼️ Bild auswählen</button>
+        <label for="cameraInput" class="primary" style="flex:1;font-size:17px;padding:14px;text-align:center;border-radius:10px;cursor:pointer;margin:0">📷 Beleg fotografieren</label>
+        <label for="galleryInput" class="secondary" style="flex:1;font-size:16px;padding:14px;text-align:center;border-radius:10px;cursor:pointer;margin:0">🖼️ Bild auswählen</label>
       </div>
       <div class="row">
         <button class="primary" id="scanBtn">Beleg auslesen</button>
@@ -160,15 +161,41 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
-let receipts = JSON.parse(localStorage.getItem('receiptScanner.receipts') || '[]');
-let properties = JSON.parse(localStorage.getItem('receiptScanner.properties') || '["Objekt 1","Objekt 2","Objekt 3"]');
+let receipts = [];
+let properties = ['Objekt 1','Objekt 2','Objekt 3'];
+try{
+  receipts = JSON.parse(localStorage.getItem('receiptScanner.receipts') || '[]');
+  properties = JSON.parse(localStorage.getItem('receiptScanner.properties') || '["Objekt 1","Objekt 2","Objekt 3"]');
+}catch(e){
+  console.warn('Lokale Daten konnten nicht gelesen werden:', e);
+}
 let currentImage = null;
 const GOOGLE_CLIENT_ID = '1018365274480-b9ac0rg70cockvlh3gqla33qdvifa190.apps.googleusercontent.com';
 const DRIVE_ROOT_FOLDER_ID = '1xNkoDKG9D9T-0pQggoUoFxqFaH6dpn2f';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
 let googleTokenClient = null;
 let googleAccessToken = null;
+const jsStatusEl = document.getElementById('jsStatus');
+if(jsStatusEl){
+  jsStatusEl.textContent = 'JavaScript aktiv ✓';
+  jsStatusEl.className = 'status ok';
+}
 
+
+window.addEventListener('error', (e)=>{
+  const el=document.getElementById('jsStatus');
+  if(el){
+    el.textContent='JavaScript-Fehler: ' + (e.message || 'unbekannt');
+    el.className='status err';
+  }
+});
+window.addEventListener('unhandledrejection', (e)=>{
+  const el=document.getElementById('jsStatus');
+  if(el){
+    el.textContent='JavaScript-Fehler: ' + (e.reason?.message || e.reason || 'Promise-Fehler');
+    el.className='status err';
+  }
+});
 
 function initGoogleDrive(){
   if(!window.google || !google.accounts || !google.accounts.oauth2){
@@ -342,16 +369,6 @@ function showSelectedImage(file){
   $('ocrStatus').textContent = 'Foto ausgewählt. Jetzt „Beleg auslesen“ antippen.';
   $('ocrStatus').className = 'status';
 }
-
-$('cameraBtn').onclick=()=>{
-  $('cameraInput').value = '';
-  $('cameraInput').click();
-};
-
-$('galleryBtn').onclick=()=>{
-  $('galleryInput').value = '';
-  $('galleryInput').click();
-};
 
 $('cameraInput').addEventListener('change', e=>{
   const f = e.target.files?.[0];
@@ -542,9 +559,7 @@ $('saveBtn').onclick=async()=>{
   }catch(err){
     console.error(err);
     setDriveStatus('Speichern in Google Drive fehlgeschlagen.', 'err');
-    alert('Google-Drive-Upload fehlgeschlagen:
-
-' + err.message);
+    alert('Google-Drive-Upload fehlgeschlagen:\n\n' + err.message);
   }finally{
     btn.disabled=false;
     btn.textContent=oldText;
@@ -559,6 +574,7 @@ $('addPropertyBtn').onclick=()=>{
 
 $('excelBtn').onclick=()=>{
   if(!receipts.length){alert('Noch keine Belege gespeichert.');return;}
+  $('excelBtn').textContent='Excel wird erstellt …';
   const rows=receipts.map(r=>({
     'Kaufdatum':r.date,
     'Händler':r.merchant,
@@ -574,6 +590,7 @@ $('excelBtn').onclick=()=>{
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,'Belege');
   XLSX.writeFile(wb,'Immobilien_Belege.xlsx');
+  $('excelBtn').textContent='Excel exportieren';
 };
 
 $('deleteAllBtn').onclick=()=>{
