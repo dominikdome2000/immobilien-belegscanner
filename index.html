@@ -57,7 +57,7 @@
 <body>
 <div class="wrap">
   <h1>Immobilien‑Belegscanner</h1>
-  <div class="sub">Beleg fotografieren, Daten auslesen, Immobilie zuordnen und als Excel exportieren. <b>V9</b></div>
+  <div class="sub">Beleg fotografieren, automatisch per KI auswerten, Immobilie zuordnen und als Excel exportieren. <b>V10 – KI</b></div>
 <div id="jsStatus" class="status err" style="margin-bottom:10px">JavaScript wird geladen …</div>
 
   <div class="grid">
@@ -76,10 +76,10 @@
         <label for="galleryInput" class="secondary" style="flex:1;font-size:16px;padding:14px;text-align:center;border-radius:10px;cursor:pointer;margin:0">🖼️ Bild auswählen</label>
       </div>
       <div class="row">
-        <button class="primary" id="scanBtn">Beleg auslesen</button>
+        <button class="primary" id="scanBtn">KI-Auswertung wiederholen</button>
         <button class="ghost" id="clearImgBtn">Neu aufnehmen</button>
       </div>
-      <div id="ocrStatus" class="status">„Beleg fotografieren“ öffnet direkt die Android-Kamera.</div>
+      <div id="ocrStatus" class="status">Nach Foto oder Bildauswahl startet die KI-Auswertung automatisch.</div>
     </section>
 
     <section class="card">
@@ -157,7 +157,6 @@
 </div>
 
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
@@ -175,6 +174,8 @@ const DRIVE_ROOT_FOLDER_ID = '1xNkoDKG9D9T-0pQggoUoFxqFaH6dpn2f';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
 let googleTokenClient = null;
 let googleAccessToken = null;
+const AI_BACKEND_URL = 'https://belegscanner-ai-1018365274480.europe-west1.run.app';
+let analysisPromise = null;
 const jsStatusEl = document.getElementById('jsStatus');
 if(jsStatusEl){
   jsStatusEl.textContent = 'JavaScript aktiv ✓';
@@ -366,8 +367,7 @@ function showSelectedImage(file){
   $('preview').src = url;
   $('preview').style.display = 'block';
   $('placeholder').style.display = 'none';
-  $('ocrStatus').textContent = 'Foto ausgewählt. Jetzt „Beleg auslesen“ antippen.';
-  $('ocrStatus').className = 'status';
+  analysisPromise = analyzeReceiptWithAI(file);
 }
 
 $('cameraInput').addEventListener('change', e=>{
@@ -384,132 +384,60 @@ $('galleryInput').addEventListener('change', e=>{
 
 $('clearImgBtn').onclick=()=>{
   currentImage = null;
+  analysisPromise = null;
   $('cameraInput').value = '';
   $('galleryInput').value = '';
   $('preview').src = '';
   $('preview').style.display = 'none';
   $('placeholder').textContent = 'Noch kein Beleg fotografiert';
   $('placeholder').style.display = 'block';
-  $('ocrStatus').textContent = 'Beleg fotografieren oder Bild auswählen.';
+  $('ocrStatus').textContent = 'Nach Foto oder Bildauswahl startet die KI-Auswertung automatisch.';
   $('ocrStatus').className = 'status';
 };
 
-function parseDate(text){
-  const m=text.match(/\b(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})\b/);
-  if(!m) return '';
-  let y=m[3]; if(y.length===2) y='20'+y;
-  return `${y}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
-}
-function parseAmount(text){
-  const lines=text.split(/\n/).map(s=>s.trim()).filter(Boolean);
-  const preferred=lines.filter(l=>/gesamt|summe|total|betrag|zu zahlen|endbetrag/i.test(l));
-  const candidates=[...preferred,...lines.reverse()];
-  for(const line of candidates){
-    const nums=[...line.matchAll(/(\d{1,4}(?:[.\s]\d{3})*[,.]\d{2})/g)];
-    if(nums.length){
-      const raw=nums[nums.length-1][1].replace(/\s/g,'').replace(/\./g,'').replace(',','.');
-      const val=parseFloat(raw); if(!isNaN(val)) return val.toFixed(2);
-    }
-  }
-  return '';
-}
-function parseMerchant(text){
-  const lines=text.split(/\n/).map(s=>s.trim()).filter(s=>s.length>2);
-  const known=['BAUHAUS','HORNBACH','OBI','TOOM','HAGEBAU','WÜRTH','AMAZON','IKEA','ALDI','LIDL','REWE','EDEKA'];
-  const up=text.toUpperCase();
-  const k=known.find(x=>up.includes(x)); if(k) return k;
-  return lines[0] || '';
-}
-function parseItems(text){
-  const t = text.toLowerCase()
-    .replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/ß/g,'ss');
-
-  const groups = [
-    {
-      name:'Fliesen und Zubehör',
-      words:['fliese','fliesen','fliesenkleber','fugenkreuz','fugenkreuze','fugenmasse','fugenmoertel','fugenmörtel','kelle','zahnkelle','fliesenprofil','fliesenschiene']
-    },
-    {
-      name:'Malerbedarf',
-      words:['farbe','wandfarbe','lack','lasur','pinsel','farbrolle','malerrolle','abdeckfolie','kreppband','spachtelmasse','spachtel']
-    },
-    {
-      name:'Elektromaterial',
-      words:['kabel','leitung','steckdose','schalter','abzweigdose','klemme','sicherung','automat','led','lampe','leuchte','installationsrohr']
-    },
-    {
-      name:'Sanitärmaterial',
-      words:['rohr','fitting','siphon','armatur','wasserhahn','dichtung','wc','toilette','waschbecken','dusche','schlauch','ventil']
-    },
-    {
-      name:'Heizungsmaterial',
-      words:['heizkoerper','heizkörper','thermostat','heizung','heizungsrohr','entluefter','entlüfter','ventilkopf']
-    },
-    {
-      name:'Holz und Zubehör',
-      words:['holz','brett','latte','kantholz','leiste','osb','spanplatte','multiplex','schraube','schrauben','nagel','naegel','nägel','duebel','dübel']
-    },
-    {
-      name:'Trockenbau-Material',
-      words:['rigips','gipskarton','trockenbau','cd profil','ud profil','spachtelmasse','gipsplatte','daemmung','dämmung','mineralwolle']
-    },
-    {
-      name:'Bodenbelag und Zubehör',
-      words:['laminat','vinyl','parkett','sockelleiste','trittschall','bodenbelag','unterlage']
-    },
-    {
-      name:'Gartenmaterial',
-      words:['pflanze','erde','blumenerde','rasen','duenger','dünger','gartenschlauch','pflasterstein','randstein']
-    },
-    {
-      name:'Werkzeug und Zubehör',
-      words:['bohrer','bohrmaschine','akkuschrauber','saege','säge','hammer','zange','schraubendreher','bitset','werkzeug','trennscheibe']
-    },
-    {
-      name:'Baumaterial',
-      words:['zement','beton','moertel','mörtel','putz','sand','kies','stein','mauerstein','bauschaum','silikon','acryl']
-    }
-  ];
-
-  let best = null;
-  for(const g of groups){
-    let score = 0;
-    for(const w of g.words){
-      const ww = w.toLowerCase()
-        .replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/ß/g,'ss');
-      if(t.includes(ww)) score++;
-    }
-    if(!best || score > best.score) best = {name:g.name, score};
-  }
-
-  if(best && best.score > 0) return best.name;
-
-  // Fallback: lieber eine kurze allgemeine Bezeichnung als eine lange Artikelliste.
-  if(/bauhaus|hornbach|obi|toom|hagebau/.test(t)) return 'Baumaterial und Zubehör';
-  return 'Material / Zubehör';
-}
-
-$('scanBtn').onclick=async()=>{
-  if(!currentImage){$('ocrStatus').textContent='Bitte zuerst ein Foto auswählen.';$('ocrStatus').className='status err';return;}
+async function analyzeReceiptWithAI(file){
+  if(!file) return false;
+  const btn=$('scanBtn');
+  const oldText=btn.textContent;
+  btn.disabled=true;
+  btn.textContent='KI analysiert …';
+  $('ocrStatus').textContent='Beleg wird automatisch mit KI ausgewertet …';
+  $('ocrStatus').className='status';
   try{
-    $('ocrStatus').textContent='Beleg wird ausgelesen …'; $('ocrStatus').className='status';
-    const result=await Tesseract.recognize(currentImage,'deu+eng',{
-      logger:m=>{
-        if(m.status==='recognizing text') $('ocrStatus').textContent=`Texterkennung: ${Math.round((m.progress||0)*100)} %`;
-      }
-    });
-    const text=result.data.text||'';
-    $('merchant').value=parseMerchant(text);
-    $('date').value=parseDate(text);
-    $('amount').value=parseAmount(text);
-    $('items').value=parseItems(text);
-    $('ocrStatus').textContent='Erkennung abgeschlossen. Bitte Daten kurz prüfen.';
+    const form=new FormData();
+    form.append('image',file,file.name||'beleg.jpg');
+    const resp=await fetch(AI_BACKEND_URL,{method:'POST',body:form});
+    const data=await resp.json();
+    if(!resp.ok) throw new Error(data.error||`HTTP ${resp.status}`);
+    $('merchant').value=data.haendler||'';
+    $('date').value=data.kaufdatum||'';
+    $('amount').value=Number(data.gesamtbetrag||0)>0 ? Number(data.gesamtbetrag).toFixed(2) : '';
+    $('items').value=data.kurzbeschreibung||'';
+    if(data.kategorie){
+      const c=$('category');
+      if([...c.options].some(o=>o.value===data.kategorie||o.text===data.kategorie)) c.value=data.kategorie;
+    }
+    $('ocrStatus').textContent='KI-Auswertung abgeschlossen ✓ Bitte kurz prüfen und Immobilie auswählen.';
     $('ocrStatus').className='status ok';
+    return true;
   }catch(err){
     console.error(err);
-    $('ocrStatus').textContent='Texterkennung fehlgeschlagen. Daten können manuell eingetragen werden.';
+    $('ocrStatus').textContent='KI-Auswertung fehlgeschlagen: '+(err.message||'Unbekannter Fehler');
     $('ocrStatus').className='status err';
+    return false;
+  }finally{
+    btn.disabled=false;
+    btn.textContent=oldText;
   }
+}
+
+$('scanBtn').onclick=()=>{
+  if(!currentImage){
+    $('ocrStatus').textContent='Bitte zuerst ein Foto aufnehmen oder auswählen.';
+    $('ocrStatus').className='status err';
+    return;
+  }
+  analysisPromise=analyzeReceiptWithAI(currentImage);
 };
 
 function resetForm(){
@@ -519,6 +447,11 @@ function resetForm(){
 $('resetBtn').onclick=resetForm;
 
 $('saveBtn').onclick=async()=>{
+  if(analysisPromise){
+    const b=$('saveBtn'), t=b.textContent;
+    b.disabled=true; b.textContent='KI-Auswertung wird abgeschlossen …';
+    try{ await analysisPromise; } finally { b.disabled=false; b.textContent=t; }
+  }
   const r={
     date:$('date').value,
     merchant:$('merchant').value.trim(),
