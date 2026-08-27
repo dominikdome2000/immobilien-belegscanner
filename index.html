@@ -69,11 +69,12 @@
           Kamera wird vorbereitet …
         </div>
       </div>
+      <div id="cameraError" class="status" style="display:none;margin-top:8px"></div>
       <canvas id="cameraCanvas" style="display:none"></canvas>
       <input id="file" type="file" accept="image/*" capture="environment" style="display:none">
 
       <div class="row" style="margin-top:12px">
-        <button class="primary" id="cameraBtn" style="flex:1;font-size:17px;padding:14px">📷 Kamera starten</button>
+        <button class="primary" id="cameraBtn" style="flex:1;font-size:17px;padding:14px">📷 Kamera öffnen</button>
         <button class="primary" id="captureBtn" style="flex:1;font-size:17px;padding:14px;display:none">● Foto aufnehmen</button>
       </div>
       <div class="row">
@@ -81,7 +82,7 @@
         <button class="primary" id="scanBtn">Beleg auslesen</button>
         <button class="ghost" id="clearImgBtn">Neu aufnehmen</button>
       </div>
-      <div id="ocrStatus" class="status">Die Texterkennung läuft lokal im Browser.</div>
+      <div id="ocrStatus" class="status">Direkte Chrome-Kamera mit Android-Kamera-Fallback.</div>
     </section>
 
     <section class="card">
@@ -338,9 +339,16 @@ window.deleteReceipt=function(i){
 let cameraStream = null;
 
 async function startCamera(){
+  const errBox=$('cameraError');
+  errBox.style.display='none';
+  errBox.textContent='';
+
   try{
+    if(!window.isSecureContext){
+      throw new Error('UNSICHERER_KONTEXT');
+    }
     if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-      throw new Error('Kamera-API wird von diesem Browser nicht unterstützt.');
+      throw new Error('KEINE_GETUSERMEDIA_API');
     }
 
     stopCamera();
@@ -348,14 +356,27 @@ async function startCamera(){
     $('placeholder').style.display='block';
     $('preview').style.display='none';
 
-    cameraStream = await navigator.mediaDevices.getUserMedia({
+    let constraints = {
       video:{
-        facingMode:{ideal:'environment'},
-        width:{ideal:1920},
-        height:{ideal:1080}
+        facingMode:{exact:'environment'}
       },
       audio:false
-    });
+    };
+
+    try{
+      cameraStream = await navigator.mediaDevices.getUserMedia(constraints);
+    }catch(firstErr){
+      // Manche Android-Geräte unterstützen "exact" nicht sauber.
+      constraints = {
+        video:{
+          facingMode:{ideal:'environment'},
+          width:{ideal:1920},
+          height:{ideal:1080}
+        },
+        audio:false
+      };
+      cameraStream = await navigator.mediaDevices.getUserMedia(constraints);
+    }
 
     const video=$('cameraVideo');
     video.srcObject=cameraStream;
@@ -364,13 +385,46 @@ async function startCamera(){
     $('cameraBtn').style.display='none';
     $('captureBtn').style.display='block';
     await video.play();
+
   }catch(err){
-    console.error(err);
-    $('placeholder').innerHTML='Kamera konnte nicht automatisch geöffnet werden.<br><br>Tippe auf <b>Kamera starten</b> und erlaube Chrome den Kamerazugriff.';
-    $('placeholder').style.display='block';
+    console.error('Kamerafehler:', err);
+
+    stopCamera();
     $('cameraVideo').style.display='none';
-    $('cameraBtn').style.display='block';
     $('captureBtn').style.display='none';
+    $('cameraBtn').style.display='block';
+    $('cameraBtn').textContent='📷 Kamera öffnen';
+
+    let reason='Die direkte Kamera konnte nicht geöffnet werden.';
+    let detail = err?.name || err?.message || 'Unbekannter Fehler';
+
+    if(detail.includes('NotAllowedError')){
+      reason='Chrome hat keinen Kamerazugriff. Bitte Kamera-Berechtigung für diese Website erlauben.';
+    }else if(detail.includes('NotFoundError') || detail.includes('DevicesNotFoundError')){
+      reason='Auf diesem Gerät wurde keine passende Kamera gefunden.';
+    }else if(detail.includes('NotReadableError') || detail.includes('TrackStartError')){
+      reason='Die Kamera wird gerade von einer anderen App verwendet.';
+    }else if(detail.includes('OverconstrainedError')){
+      reason='Die Rückkamera konnte mit den angeforderten Einstellungen nicht gestartet werden.';
+    }else if(detail.includes('UNSICHERER_KONTEXT')){
+      reason='Die direkte Kamera funktioniert nur über HTTPS.';
+    }else if(detail.includes('KEINE_GETUSERMEDIA_API')){
+      reason='Diese Chrome-Version unterstützt den direkten Kameramodus nicht.';
+    }
+
+    errBox.textContent = reason + ' Es wird jetzt die Android-Kamera geöffnet.';
+    errBox.className='status err';
+    errBox.style.display='block';
+
+    // Sicherer Fallback: nativer Android-Kamera-/Dateidialog.
+    setTimeout(()=>{
+      try{
+        $('file').setAttribute('capture','environment');
+        $('file').click();
+      }catch(e){
+        console.error('Fallback-Kamera fehlgeschlagen:', e);
+      }
+    }, 300);
   }
 }
 
@@ -386,7 +440,10 @@ function stopCamera(){
   }
 }
 
-$('cameraBtn').onclick=startCamera;
+$('cameraBtn').onclick=()=>{
+  $('file').setAttribute('capture','environment');
+  startCamera();
+};
 
 $('captureBtn').onclick=()=>{
   const video=$('cameraVideo');
@@ -415,10 +472,16 @@ $('captureBtn').onclick=()=>{
   },'image/jpeg',0.92);
 };
 
-$('galleryBtn').onclick=()=>$('file').click();
+$('galleryBtn').onclick=()=>{
+  $('file').removeAttribute('capture');
+  $('file').click();
+};
 
 $('file').addEventListener('change', e=>{
   const f=e.target.files?.[0]; if(!f) return;
+  const errBox=$('cameraError');
+  errBox.style.display='none';
+  errBox.textContent='';
   stopCamera();
   currentImage=f;
   const url=URL.createObjectURL(f);
@@ -436,7 +499,7 @@ $('clearImgBtn').onclick=()=>{
   $('file').value='';
   $('preview').src='';
   $('preview').style.display='none';
-  $('cameraBtn').textContent='📷 Kamera starten';
+  $('cameraBtn').textContent='📷 Kamera öffnen';
   $('placeholder').textContent='Kamera wird vorbereitet …';
   $('placeholder').style.display='block';
   startCamera();
@@ -652,7 +715,7 @@ window.addEventListener('load', ()=>{
   // Auf dem Handy direkt den Kamera-Dialog anstoßen. Browser können dies aus Sicherheitsgründen blockieren;
   // dann bleibt der große 'Beleg fotografieren'-Button sichtbar.
   if(/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)){
-    setTimeout(()=>{ startCamera(); }, 500);
+    
   }
 });
 renderProperties(); renderTable();
